@@ -8,9 +8,28 @@ function productPwa(): Plugin {
   return {
     name: 'product-pwa',
     transformIndexHtml(html) {
+      const siteUrl = new URL(
+        process.env.SITE_URL ?? process.env.BASE_PATH ?? '/',
+        'http://localhost',
+      )
+      if (!siteUrl.pathname.endsWith('/')) siteUrl.pathname += '/'
+      siteUrl.search = ''
+      siteUrl.hash = ''
+
+      const socialTitle = `${product.displayName} — ${product.taglineEn}`
+      const socialImageUrl = new URL(product.socialImage.path, siteUrl).href
+
       return html
         .replaceAll('%APP_TITLE%', product.displayName)
         .replaceAll('%APP_DESCRIPTION%', product.description)
+        .replaceAll('%APP_SITE_URL%', siteUrl.href)
+        .replaceAll('%APP_LOCALE%', product.locale)
+        .replaceAll('%APP_SOCIAL_TITLE%', socialTitle)
+        .replaceAll('%APP_SOCIAL_IMAGE_URL%', socialImageUrl)
+        .replaceAll('%APP_SOCIAL_IMAGE_TYPE%', product.socialImage.type)
+        .replaceAll('%APP_SOCIAL_IMAGE_WIDTH%', String(product.socialImage.width))
+        .replaceAll('%APP_SOCIAL_IMAGE_HEIGHT%', String(product.socialImage.height))
+        .replaceAll('%APP_SOCIAL_IMAGE_ALT%', product.socialImage.alt)
     },
     generateBundle: {
       order: 'post',

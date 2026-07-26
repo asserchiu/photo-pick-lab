@@ -72,14 +72,16 @@ npm run test:e2e
 
 `.github/workflows/deploy.yml` verifies and publishes `dist` to GitHub Pages after every push to `main`; it can also be started manually from the Actions tab. Configure the repository once under **Settings → Pages → Build and deployment → Source** by selecting **GitHub Actions**.
 
-The expected project-page URL is <https://asserchiu.github.io/photo-pick-lab/>. Validate the same subpath locally before changing deployment behavior:
+The workflow injects `BASE_PATH` for Vite assets and `SITE_URL` as the full public URL prefix used by canonical, Open Graph, and Twitter metadata. `SITE_URL` honors a repository Actions variable of the same name and otherwise derives the repository's project-page URL. This keeps the deployment host and prefix out of the product source; use a full HTTPS URL ending in `/` when overriding it.
+
+The expected default project-page URL is <https://asserchiu.github.io/photo-pick-lab/>. Validate the same subpath locally before changing deployment behavior:
 
 ```bash
 BASE_PATH=/photo-pick-lab/ npm run verify
 BASE_PATH=/photo-pick-lab/ npm run test:e2e
 ```
 
-The base path is applied to Vite assets, the web app manifest, the service worker, the photo-analysis worker, and in-app home navigation.
+The base path is applied to Vite assets, the web app manifest, the service worker, the photo-analysis worker, and in-app home navigation. Social previews use the square `public/icons/moon-512.png` icon with a standard `summary` card rather than an App screenshot or large-image card.
 
 ## Known detector limits
 

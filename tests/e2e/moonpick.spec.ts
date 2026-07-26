@@ -147,7 +147,11 @@ test('imports, ranks, corrects, compares scale, and exports locally', async ({ p
   ]
   const hashesBefore = await Promise.all(sourcePaths.map(sha256))
 
-  await page.goto('/')
+  await page.goto('./')
+  await expect(page.getByRole('link', { name: 'MoonPick home' })).toHaveAttribute(
+    'href',
+    new URL(page.url()).pathname,
+  )
   await expect(page.getByRole('heading', { name: 'Find the sharpest moon shot.' })).toBeVisible()
   await expect(page.getByText('相似照片精選')).toHaveCount(0)
   await page.getByLabel('選取照片').setInputFiles(sourcePaths)
@@ -198,12 +202,16 @@ test('imports, ranks, corrects, compares scale, and exports locally', async ({ p
 
   expect(await Promise.all(sourcePaths.map(sha256))).toEqual(hashesBefore)
   expect(requests.every((request) => ['GET', 'HEAD'].includes(request.method))).toBe(true)
-  expect(requests.every((request) => new URL(request.url).origin === 'http://127.0.0.1:4173')).toBe(true)
+  const appUrl = new URL(page.url())
+  expect(requests.every((request) => new URL(request.url).origin === appUrl.origin)).toBe(true)
+  const appBasePath = appUrl.pathname
+  const httpRequests = requests.filter((request) => ['http:', 'https:'].includes(new URL(request.url).protocol))
+  expect(httpRequests.every((request) => new URL(request.url).pathname.startsWith(appBasePath))).toBe(true)
   expect(requests.every((request) => request.postData == null)).toBe(true)
 })
 
 test('blocks a fixed-size crop that cannot remain centered', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('./')
   await page.getByLabel('選取照片').setInputFiles(fixture('moon-large-sharp.png'))
   await expect(page.getByRole('heading', { name: '同批排名' })).toBeVisible()
   await page.getByRole('button', {
@@ -226,7 +234,7 @@ test('decodes EXIF orientations 2 through 8 into upright dimensions', async ({ p
     7: ['Y', 'G', 'B', 'R'],
     8: ['G', 'Y', 'R', 'B'],
   }
-  await page.goto('/')
+  await page.goto('./')
   for (let orientation = 2; orientation <= 8; orientation += 1) {
     const jpeg = await browserMoonJpeg(page, orientation)
     await page.getByLabel('選取照片').setInputFiles({
@@ -243,7 +251,7 @@ test('decodes EXIF orientations 2 through 8 into upright dimensions', async ({ p
 })
 
 test('applies EXIF orientation and manual circle edits to fill JPEG export', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('./')
   const jpeg = await browserMoonJpeg(page)
   await page.getByLabel('選取照片').setInputFiles({
     name: 'oriented-moon.jpg',
@@ -305,7 +313,7 @@ test('applies EXIF orientation and manual circle edits to fill JPEG export', asy
 
 test('keeps the wide title on one line and Inspect within its panel', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.goto('/')
+  await page.goto('./')
 
   const title = page.getByRole('heading', { name: 'Find the sharpest moon shot.' })
   const titleLayout = await title.evaluate((element) => {
@@ -353,7 +361,7 @@ test('keeps the wide title on one line and Inspect within its panel', async ({ p
 
 test('keeps a narrow 16:9 crop preview proportional to export', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/')
+  await page.goto('./')
   await page.getByLabel('選取照片').setInputFiles(fixture('moon-large-sharp.png'))
   await expect(page.getByRole('heading', { name: '同批排名' })).toBeVisible()
   await page.getByRole('button', { name: '16:9' }).click()
@@ -370,7 +378,7 @@ test('reloads the cached app shell while offline', async ({ page, context, brows
   expect(serviceWorker).toContain('caches.open(CACHE_NAME)')
   expect(serviceWorker).not.toContain('caches.match(')
 
-  await page.goto('/')
+  await page.goto('./')
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready
     if (navigator.serviceWorker.controller == null) {

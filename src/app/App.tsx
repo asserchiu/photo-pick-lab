@@ -72,7 +72,7 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="site-header">
-        <a className="brand" href="/" aria-label={`${product.displayName} home`}>
+        <a className="brand" href={import.meta.env.BASE_URL} aria-label={`${product.displayName} home`}>
           <span className="brand-mark" aria-hidden="true">◐</span>
           <span>{product.displayName}</span>
         </a>

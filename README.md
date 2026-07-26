@@ -68,6 +68,19 @@ npm run test:e2e
 
 `npm run verify` runs the first four gates in sequence. Playwright tests build and exercise the production preview.
 
+## Deployment
+
+`.github/workflows/deploy.yml` verifies and publishes `dist` to GitHub Pages after every push to `main`; it can also be started manually from the Actions tab. Configure the repository once under **Settings → Pages → Build and deployment → Source** by selecting **GitHub Actions**.
+
+The expected project-page URL is <https://asserchiu.github.io/photo-pick-lab/>. Validate the same subpath locally before changing deployment behavior:
+
+```bash
+BASE_PATH=/photo-pick-lab/ npm run verify
+BASE_PATH=/photo-pick-lab/ npm run test:e2e
+```
+
+The base path is applied to Vite assets, the web app manifest, the service worker, the photo-analysis worker, and in-app home navigation.
+
 ## Known detector limits
 
 A rule-based single-image detector cannot reliably distinguish every isolated, clipped, textureless circular light from an overexposed full moon. Thin crescents, heavy cloud, daylight backgrounds, border-truncated moons, very small moons, streetlights, reflections, and low-contrast star fields may require manual circle correction. Low-radial-contrast candidates are held out of the provisional ranking, but they remain available for review instead of being silently discarded. Detection confidence is shown separately from image quality so an uncertain location is not silently treated as a low-quality photo.

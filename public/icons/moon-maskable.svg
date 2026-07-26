@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Moon">
+  <rect width="512" height="512" fill="#0c1020"/>
+  <circle cx="256" cy="256" r="128" fill="#f5eacb"/>
+  <circle cx="307" cy="219" r="27" fill="#d7caa7" opacity=".68"/>
+  <circle cx="212" cy="294" r="36" fill="#d7caa7" opacity=".52"/>
+  <circle cx="182" cy="203" r="17" fill="#d7caa7" opacity=".46"/>
+</svg>

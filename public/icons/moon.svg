@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Moon">
+  <rect width="512" height="512" rx="112" fill="#0c1020"/>
+  <circle cx="256" cy="256" r="150" fill="#f5eacb"/>
+  <circle cx="315" cy="212" r="31" fill="#d7caa7" opacity=".68"/>
+  <circle cx="204" cy="300" r="42" fill="#d7caa7" opacity=".52"/>
+  <circle cx="170" cy="194" r="20" fill="#d7caa7" opacity=".46"/>
+  <path d="M383 118a176 176 0 0 0-216 267A176 176 0 1 1 383 118Z" fill="#fff" opacity=".14"/>
+</svg>

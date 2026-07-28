@@ -10,7 +10,7 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
-    types: [labeled, unlabeled, synchronize, reopened, closed]
+    types: [opened, labeled, unlabeled, synchronize, reopened, closed]
   workflow_dispatch:
     inputs:
       remove_slot:
@@ -81,8 +81,10 @@ jobs:
               ;;
             workflow_dispatch)
               if [ -n "$REMOVE_SLOT" ]; then
+                # Traversal is rejected by the publish script; only absolute
+                # paths need catching before it normalizes the slot.
                 case "$REMOVE_SLOT" in
-                  /*|*..*) echo "Refusing slot outside the site tree: $REMOVE_SLOT" >&2; exit 1 ;;
+                  /*) echo "Slot must be relative to the site root: $REMOVE_SLOT" >&2; exit 1 ;;
                 esac
                 MODE=remove
                 SLOT="${REMOVE_SLOT%/}"
@@ -214,10 +216,11 @@ jobs:
     environment:
       name: github-pages
       url: ${{ needs.resolve.outputs.site_url }}
-    # Every run rewrites the same storage branch and the same Pages
-    # deployment, so publishing must be serialized rather than cancelled.
+    # Runs touching different slots only contend on the storage branch push,
+    # which the publish step retries. Serialize per slot instead of globally so
+    # a queued publish is never cancelled and silently dropped.
     concurrency:
-      group: pages-site
+      group: pages-site-${{ needs.resolve.outputs.slot || 'root' }}
       cancel-in-progress: false
     steps:
       # Always take the tooling from the default branch: this job holds write
@@ -229,20 +232,9 @@ jobs:
           sparse-checkout: .github/tools
           path: tools
 
-      - name: Restore published site
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git ls-remote --exit-code --heads "$REMOTE" "$STORAGE_BRANCH" >/dev/null 2>&1; then
-            git clone --depth 1 --branch "$STORAGE_BRANCH" "$REMOTE" site
-          else
-            echo "Bootstrapping empty $STORAGE_BRANCH"
-            mkdir site
-            git -C site init -q -b "$STORAGE_BRANCH"
-            git -C site remote add origin "$REMOTE"
-          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
 
       - name: Download build output
         if: needs.resolve.outputs.mode == 'publish'
@@ -251,8 +243,14 @@ jobs:
           name: site-build
           path: build
 
-      - name: Write slot into site tree
+      # Restoring the tree, rewriting the slot and pushing are one unit: a
+      # rejected push means someone else advanced the branch, and the only sound
+      # recovery is to start over from their state. The publish script is
+      # idempotent, so replaying it is exact — unlike rebasing a shallow clone,
+      # which would replay a stale tree over the newer one.
+      - name: Publish slot to storage branch
         env:
+          GH_TOKEN: ${{ github.token }}
           MODE: ${{ needs.resolve.outputs.mode }}
           SLOT: ${{ needs.resolve.outputs.slot }}
           LABEL: ${{ needs.resolve.outputs.label }}
@@ -261,35 +259,53 @@ jobs:
           SITE_ROOT: ${{ needs.resolve.outputs.site_root }}
         run: |
           set -euo pipefail
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
           ARGS=(--root site --site-root "$SITE_ROOT" --slot "$SLOT")
           if [ "$MODE" = remove ]; then
             ARGS+=(--remove)
           else
             ARGS+=(--build build --label "$LABEL" --ref "$REF" --sha "$SHA")
           fi
-          node tools/.github/tools/render-site-index.mjs "${ARGS[@]}"
 
-      - name: Commit site tree
-        env:
-          MODE: ${{ needs.resolve.outputs.mode }}
-          SLOT: ${{ needs.resolve.outputs.slot }}
-        run: |
-          set -euo pipefail
-          cd site
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          if git diff --cached --quiet; then
-            echo 'Site tree unchanged'
-            exit 0
-          fi
-          git commit -q -m "$MODE ${SLOT:-/} from ${GITHUB_SHA::7}"
+          # Calling a function in a condition disables errexit inside it, so
+          # every fallible command propagates its own failure. Status 2 means
+          # the rewrite itself is broken and retrying cannot help.
+          apply_and_push() {
+            rm -rf site
+            if git ls-remote --exit-code --heads "$REMOTE" "$STORAGE_BRANCH" >/dev/null 2>&1; then
+              git clone --quiet --depth 1 --branch "$STORAGE_BRANCH" "$REMOTE" site || return 1
+            else
+              echo "Bootstrapping empty $STORAGE_BRANCH"
+              mkdir site || return 1
+              git -C site init -q -b "$STORAGE_BRANCH" || return 1
+              git -C site remote add origin "$REMOTE" || return 1
+            fi
+
+            node tools/.github/tools/publish-site.mjs "${ARGS[@]}" || return 2
+
+            git -C site config user.name 'github-actions[bot]' || return 1
+            git -C site config user.email '41898282+github-actions[bot]@users.noreply.github.com' || return 1
+            git -C site add -A || return 1
+            if git -C site diff --cached --quiet; then
+              echo 'Site tree unchanged'
+              return 0
+            fi
+            git -C site commit -q -m "$MODE ${SLOT:-/} from ${GITHUB_SHA::7}" || return 1
+            git -C site push --quiet origin "HEAD:$STORAGE_BRANCH" || return 1
+          }
+
           for attempt in 1 2 3; do
-            if git push -u origin "HEAD:$STORAGE_BRANCH"; then
+            status=0
+            apply_and_push || status=$?
+            if [ "$status" -eq 0 ]; then
               exit 0
             fi
-            echo "Push attempt $attempt failed; rebasing onto $STORAGE_BRANCH"
-            git pull --rebase origin "$STORAGE_BRANCH" || true
+            if [ "$status" -eq 2 ]; then
+              echo "Rewriting the site tree failed; not retrying" >&2
+              exit 1
+            fi
+            echo "Publish attempt $attempt failed; restarting from the current $STORAGE_BRANCH" >&2
             sleep $((attempt * 4))
           done
           echo "Unable to update $STORAGE_BRANCH" >&2
@@ -321,7 +337,9 @@ jobs:
               'Removing the `deploy-preview` label or closing this pull request deletes it.',
             ].join('\n')
 
-            const { data: comments } = await github.rest.issues.listComments({
+            // Paginate: a marker beyond the first page would otherwise be
+            // missed and every push would add another comment.
+            const comments = await github.paginate(github.rest.issues.listComments, {
               ...context.repo,
               issue_number: context.payload.pull_request.number,
               per_page: 100,

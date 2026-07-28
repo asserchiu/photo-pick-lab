@@ -3,16 +3,16 @@
 // GitHub Pages replaces the whole site on every deployment, so parallel
 // versions only survive if each run rewrites one slot of a tree that is kept
 // between runs on a storage branch. This script performs that rewrite: it
-// installs (or deletes) one slot, updates `versions.json`, drops entries whose
-// directory has disappeared, and re-renders the index page.
+// installs (or deletes) one slot, reconciles `versions.json` against what the
+// tree actually contains, and re-renders the index page.
 //
-//   node .github/tools/render-site-index.mjs --root site \
+//   node .github/tools/publish-site.mjs --root site \
 //     --slot preview/pr-42 --build dist --label 'PR #42 — Title' \
 //     --ref feature-branch --sha 0123456 --site-root https://user.github.io/repo/
 //
-//   node .github/tools/render-site-index.mjs --root site --slot preview/pr-42 --remove
+//   node .github/tools/publish-site.mjs --root site --slot preview/pr-42 --remove
 //
-// Omitting --slot prunes and re-renders without touching any deployment.
+// Omitting --slot reconciles and re-renders without touching any deployment.
 
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -91,14 +91,54 @@ function slotUrl(siteRoot, slot) {
   return slot === '' ? siteRoot : `${siteRoot}${slot}/`
 }
 
+// A missing or damaged registry must not block a deploy: reconciliation below
+// rebuilds it from the tree, so an empty starting point is always recoverable.
 async function readRegistry(path) {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8'))
     return Array.isArray(parsed?.entries) ? parsed.entries : []
   } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn(`Ignoring unreadable ${path}: ${error.message}`)
+    }
+    return []
+  }
+}
+
+async function listSlotDirectories(root, parent) {
+  try {
+    const children = await readdir(resolve(root, parent), { withFileTypes: true })
+    return children
+      .filter((child) => child.isDirectory())
+      .map((child) => `${parent}/${child.name}`)
+  } catch (error) {
     if (error.code === 'ENOENT') return []
     throw error
   }
+}
+
+// The tree is the truth about what is being served; the registry only adds the
+// provenance we cannot recover from disk. Reconcile in both directions so a
+// lost registry cannot silently un-list a deployment that is still live.
+async function reconcile(root, entries, siteRoot) {
+  const known = new Map(entries.map((entry) => [entry.slot, entry]))
+  const present = [
+    '',
+    ...(await listSlotDirectories(root, 'version')),
+    ...(await listSlotDirectories(root, 'preview')),
+  ].filter((slot) => slotExists(root, slot))
+
+  return present.map((slot) => ({
+    slot,
+    kind: slotKind(slot),
+    label: slot || '/',
+    ref: '',
+    sha: '',
+    updatedAt: '',
+    ...known.get(slot),
+    // Recomputed every run so moving the site root cannot strand old links.
+    url: slotUrl(siteRoot, slot),
+  }))
 }
 
 const kindOrder = { root: 0, tag: 1, preview: 2, other: 3 }
@@ -239,9 +279,7 @@ if (options.has('slot')) {
   }
 }
 
-// A slot can vanish without passing through this script — a force-push to the
-// storage branch, a manual cleanup — so trust the filesystem over the registry.
-entries = sortEntries(entries.filter((entry) => slotExists(root, entry.slot)))
+entries = sortEntries(await reconcile(root, entries, siteRoot))
 
 await mkdir(dirname(indexPath), { recursive: true })
 await writeFile(registryPath, `${JSON.stringify({ generatedAt, entries }, null, 2)}\n`)

@@ -82,7 +82,9 @@ Pages serves one site per repository, so several versions can only be online at 
 | Manual run off a branch | `preview/branch-<slug>` | `…/photo-pick-lab/preview/branch-my-feature/` |
 | — | version index | `…/photo-pick-lab/versions/` |
 
-Production deploys only replace the root; `preview/`, `version/`, and the registry are excluded from the sync so parallel versions survive. A preview is deleted when its pull request closes or loses the `deploy-preview` label. Other slots are removed by running the workflow manually with a `remove_slot` input such as `version/v1.0.0`. `.github/tools/render-site-index.mjs` performs the tree rewrite: it installs or deletes one slot, maintains `versions.json`, and renders the version index, dropping entries whose directory has disappeared. The publish job always runs that script from the default branch, so a pull request cannot supply the code that holds the deployment credentials.
+Production deploys only replace the root; `preview/`, `version/`, and the registry are excluded from the sync so parallel versions survive. A preview is deleted when its pull request closes or loses the `deploy-preview` label. Other slots are removed by running the workflow manually with a `remove_slot` input such as `version/v1.0.0`.
+
+`.github/tools/publish-site.mjs` performs the tree rewrite: it installs or deletes one slot, reconciles `versions.json` against the tree, and renders the version index. Reconciliation runs both ways — entries whose directory has disappeared are dropped, and directories missing from the registry are adopted — so a lost or damaged `versions.json` rebuilds itself instead of silently un-listing a version that is still being served. Because the script is idempotent, a rejected push is recovered by re-cloning the storage branch and replaying the rewrite on top of whatever landed first. The publish job always runs that script from the default branch, so a pull request cannot supply the code that holds the deployment credentials.
 
 The workflow injects `BASE_PATH` for Vite assets and `SITE_URL` as the full public URL prefix used by canonical, Open Graph, and Twitter metadata, both derived from the slot. `SITE_URL` honors a repository Actions variable of the same name for the site root and otherwise derives the repository's project-page URL. This keeps the deployment host and prefix out of the product source; use a full HTTPS URL ending in `/` when overriding it. Everything except the production slot also builds with `SITE_NOINDEX=1`, which adds `<meta name="robots" content="noindex">` so previews and superseded releases stay out of search results.
 
@@ -99,7 +101,8 @@ The base path is applied to Vite assets, the web app manifest, the service worke
 Known limits:
 
 - Pull requests from forks get a read-only token and cannot publish a preview.
-- Publishing is serialized through one `pages-site` concurrency group. GitHub keeps only one queued run per group, so simultaneous deploys can cancel an earlier queued publish; re-run that job.
+- A preview runs the pull request author's code on the **same origin as production**, so it can read and write production's Cache Storage, `localStorage`, and IndexedDB. Service worker scope cannot be widened beyond the preview's own path, and applying the label requires triage permission on a same-repository pull request, so the trust boundary matches who can already push — but treat labeling a preview as running that code with production's origin.
+- Publishing is serialized per slot (`pages-site-<slot>`). Repeated deploys of one slot queue behind each other; different slots publish in parallel and contend only on the storage branch push, which is retried.
 - The `gh-pages` branch accumulates build output and benefits from an occasional history squash.
 
 ## Known detector limits

@@ -1,24 +1,181 @@
 name: Deploy to GitHub Pages
 
+# GitHub Pages serves a single site per repository, so parallel versions only
+# exist if we assemble the whole directory tree ourselves. The `gh-pages`
+# branch stores that tree between runs; each run rewrites one slot and
+# republishes everything.
+
 on:
   push:
     branches: [main]
+    tags: ['v*']
+  pull_request:
+    types: [labeled, unlabeled, synchronize, reopened, closed]
   workflow_dispatch:
+    inputs:
+      remove_slot:
+        description: 'Slot to delete instead of publishing (e.g. version/v1.0.0)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
+env:
+  PREVIEW_LABEL: deploy-preview
+  STORAGE_BRANCH: gh-pages
 
 jobs:
-  build:
+  resolve:
+    name: Resolve deployment slot
     runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.slot.outputs.mode }}
+      slot: ${{ steps.slot.outputs.slot }}
+      label: ${{ steps.slot.outputs.label }}
+      ref: ${{ steps.slot.outputs.ref }}
+      sha: ${{ steps.slot.outputs.sha }}
+      noindex: ${{ steps.slot.outputs.noindex }}
+      base_path: ${{ steps.slot.outputs.base_path }}
+      site_url: ${{ steps.slot.outputs.site_url }}
+      site_root: ${{ steps.slot.outputs.site_root }}
+    steps:
+      - id: slot
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REMOVE_SLOT: ${{ inputs.remove_slot }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          PR_HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, env.PREVIEW_LABEL) }}
+          REMOVED_LABEL: ${{ github.event.label.name }}
+          SITE_ROOT_INPUT: ${{ vars.SITE_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+        run: |
+          set -euo pipefail
+
+          MODE=skip
+          SLOT=''
+          LABEL=''
+          REF=''
+          SHA=''
+          NOINDEX=''
+
+          case "$EVENT_NAME" in
+            push)
+              MODE=publish
+              REF="$REF_NAME"
+              SHA="$GITHUB_SHA"
+              if [ "$REF_TYPE" = tag ]; then
+                SLOT="version/$REF_NAME"
+                LABEL="$REF_NAME"
+                NOINDEX=1
+              else
+                LABEL="$REF_NAME (production)"
+              fi
+              ;;
+            workflow_dispatch)
+              if [ -n "$REMOVE_SLOT" ]; then
+                case "$REMOVE_SLOT" in
+                  /*|*..*) echo "Refusing slot outside the site tree: $REMOVE_SLOT" >&2; exit 1 ;;
+                esac
+                MODE=remove
+                SLOT="${REMOVE_SLOT%/}"
+              else
+                MODE=publish
+                REF="$REF_NAME"
+                SHA="$GITHUB_SHA"
+                if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+                  LABEL="$REF_NAME (production)"
+                else
+                  # Slots become both directory names and URL segments.
+                  SLUG=$(printf '%s' "$REF_NAME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9._-]|-|g')
+                  SLOT="preview/branch-$SLUG"
+                  LABEL="branch $REF_NAME"
+                  NOINDEX=1
+                fi
+              fi
+              ;;
+            pull_request)
+              # A fork's GITHUB_TOKEN is read-only, so it can neither update the
+              # storage branch nor deploy. Skip rather than fail the run.
+              if [ "$PR_IS_FORK" = true ]; then
+                :
+              elif [ "$PR_ACTION" = closed ]; then
+                if [ "$PR_HAS_LABEL" = true ]; then
+                  MODE=remove
+                  SLOT="preview/pr-$PR_NUMBER"
+                fi
+              elif [ "$PR_ACTION" = unlabeled ]; then
+                if [ "$REMOVED_LABEL" = "$PREVIEW_LABEL" ]; then
+                  MODE=remove
+                  SLOT="preview/pr-$PR_NUMBER"
+                fi
+              elif [ "$PR_HAS_LABEL" = true ]; then
+                MODE=publish
+                SLOT="preview/pr-$PR_NUMBER"
+                LABEL="PR #$PR_NUMBER — $PR_TITLE"
+                REF="$PR_HEAD_REF"
+                SHA="$PR_HEAD_SHA"
+                NOINDEX=1
+              fi
+              ;;
+          esac
+
+          SITE_ROOT="$SITE_ROOT_INPUT"
+          case "$SITE_ROOT" in
+            */) ;;
+            *) SITE_ROOT="$SITE_ROOT/" ;;
+          esac
+
+          # Vite needs the path only; the metadata plugin needs the full URL.
+          REST="${SITE_ROOT#*://}"
+          BASE_ROOT="/${REST#*/}"
+
+          if [ -n "$SLOT" ]; then
+            SITE_URL="$SITE_ROOT$SLOT/"
+            BASE_PATH="$BASE_ROOT$SLOT/"
+          else
+            SITE_URL="$SITE_ROOT"
+            BASE_PATH="$BASE_ROOT"
+          fi
+
+          # The label carries a pull request title, so the heredoc delimiter has
+          # to be unguessable or the title could forge extra step outputs.
+          DELIMITER="label-$(openssl rand -hex 16)"
+
+          {
+            echo "mode=$MODE"
+            echo "slot=$SLOT"
+            echo "ref=$REF"
+            echo "sha=$SHA"
+            echo "noindex=$NOINDEX"
+            echo "base_path=$BASE_PATH"
+            echo "site_url=$SITE_URL"
+            echo "site_root=$SITE_ROOT"
+            printf 'label<<%s\n%s\n%s\n' "$DELIMITER" "$LABEL" "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "\`$MODE\` \`${SLOT:-/}\` → $SITE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ needs.resolve.outputs.slot || 'production' }}
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    # This job builds pull request code. Keep it read-only; the publish job
+    # holds the write permissions and never checks out contributed code.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/setup-node@v7
         with:
@@ -29,19 +186,156 @@ jobs:
 
       - run: npm run verify
         env:
-          BASE_PATH: /${{ github.event.repository.name }}/
-          SITE_URL: ${{ vars.SITE_URL || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+          BASE_PATH: ${{ needs.resolve.outputs.base_path }}
+          SITE_URL: ${{ needs.resolve.outputs.site_url }}
+          SITE_NOINDEX: ${{ needs.resolve.outputs.noindex }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site-build
+          path: dist
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish site
+    needs: [resolve, build]
+    if: |
+      always()
+      && needs.resolve.result == 'success'
+      && needs.resolve.outputs.mode != 'skip'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+      pull-requests: write
+    environment:
+      name: github-pages
+      url: ${{ needs.resolve.outputs.site_url }}
+    # Every run rewrites the same storage branch and the same Pages
+    # deployment, so publishing must be serialized rather than cancelled.
+    concurrency:
+      group: pages-site
+      cancel-in-progress: false
+    steps:
+      # Always take the tooling from the default branch: this job holds write
+      # permissions and must not run scripts supplied by a pull request.
+      - name: Check out publishing tools
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/tools
+          path: tools
+
+      - name: Restore published site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$REMOTE" "$STORAGE_BRANCH" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$STORAGE_BRANCH" "$REMOTE" site
+          else
+            echo "Bootstrapping empty $STORAGE_BRANCH"
+            mkdir site
+            git -C site init -q -b "$STORAGE_BRANCH"
+            git -C site remote add origin "$REMOTE"
+          fi
+
+      - name: Download build output
+        if: needs.resolve.outputs.mode == 'publish'
+        uses: actions/download-artifact@v8
+        with:
+          name: site-build
+          path: build
+
+      - name: Write slot into site tree
+        env:
+          MODE: ${{ needs.resolve.outputs.mode }}
+          SLOT: ${{ needs.resolve.outputs.slot }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+          REF: ${{ needs.resolve.outputs.ref }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          SITE_ROOT: ${{ needs.resolve.outputs.site_root }}
+        run: |
+          set -euo pipefail
+          ARGS=(--root site --site-root "$SITE_ROOT" --slot "$SLOT")
+          if [ "$MODE" = remove ]; then
+            ARGS+=(--remove)
+          else
+            ARGS+=(--build build --label "$LABEL" --ref "$REF" --sha "$SHA")
+          fi
+          node tools/.github/tools/render-site-index.mjs "${ARGS[@]}"
+
+      - name: Commit site tree
+        env:
+          MODE: ${{ needs.resolve.outputs.mode }}
+          SLOT: ${{ needs.resolve.outputs.slot }}
+        run: |
+          set -euo pipefail
+          cd site
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'Site tree unchanged'
+            exit 0
+          fi
+          git commit -q -m "$MODE ${SLOT:-/} from ${GITHUB_SHA::7}"
+          for attempt in 1 2 3; do
+            if git push -u origin "HEAD:$STORAGE_BRANCH"; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; rebasing onto $STORAGE_BRANCH"
+            git pull --rebase origin "$STORAGE_BRANCH" || true
+            sleep $((attempt * 4))
+          done
+          echo "Unable to update $STORAGE_BRANCH" >&2
+          exit 1
+
+      # The artifact is served publicly and .git holds the push credential.
+      - name: Strip repository metadata
+        run: rm -rf site/.git
 
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: dist
+          path: site
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - uses: actions/deploy-pages@v5
         id: deployment
+
+      - name: Comment preview link
+        if: github.event_name == 'pull_request' && needs.resolve.outputs.mode == 'publish'
+        uses: actions/github-script@v9
+        env:
+          SITE_URL: ${{ needs.resolve.outputs.site_url }}
+        with:
+          script: |
+            const marker = '<!-- pages-preview -->'
+            const body = [
+              marker,
+              `Preview for ${context.payload.pull_request.head.sha.slice(0, 7)}: ${process.env.SITE_URL}`,
+              '',
+              'Removing the `deploy-preview` label or closing this pull request deletes it.',
+            ].join('\n')
+
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            })
+            const existing = comments.find(
+              (comment) => comment.user.type === 'Bot' && comment.body.includes(marker),
+            )
+
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body })
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              })
+            }

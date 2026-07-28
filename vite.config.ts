@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { product } from './src/config/product'
 
 function productPwa(): Plugin {
+  let base = '/'
+
   return {
     name: 'product-pwa',
+    configResolved(config) {
+      base = config.base
+    },
     transformIndexHtml(html) {
       const siteUrl = new URL(
         process.env.SITE_URL ?? process.env.BASE_PATH ?? '/',
@@ -19,7 +24,20 @@ function productPwa(): Plugin {
       const socialTitle = `${product.displayName} — ${product.taglineEn}`
       const socialImageUrl = new URL(product.socialImage.path, siteUrl).href
 
-      return html
+      // Parallel deployments share one origin and one search index, so every
+      // version except the canonical one asks crawlers to stay away.
+      const tags: HtmlTagDescriptor[] =
+        process.env.SITE_NOINDEX === '1'
+          ? [
+              {
+                tag: 'meta',
+                attrs: { name: 'robots', content: 'noindex' },
+                injectTo: 'head',
+              },
+            ]
+          : []
+
+      const transformed = html
         .replaceAll('%APP_TITLE%', product.displayName)
         .replaceAll('%APP_DESCRIPTION%', product.description)
         .replaceAll('%APP_SITE_URL%', siteUrl.href)
@@ -30,6 +48,8 @@ function productPwa(): Plugin {
         .replaceAll('%APP_SOCIAL_IMAGE_WIDTH%', String(product.socialImage.width))
         .replaceAll('%APP_SOCIAL_IMAGE_HEIGHT%', String(product.socialImage.height))
         .replaceAll('%APP_SOCIAL_IMAGE_ALT%', product.socialImage.alt)
+
+      return { html: transformed, tags }
     },
     generateBundle: {
       order: 'post',
@@ -77,11 +97,17 @@ function productPwa(): Plugin {
       cacheHash.update(readFileSync(new URL('./public/icons/moon-maskable.svg', import.meta.url)))
       const cacheVersion = cacheHash.digest('hex').slice(0, 12)
 
+      // Cache Storage is per-origin, but parallel deployments live at different
+      // paths on one origin. Without a per-base prefix each version's activate
+      // handler would evict every other version's app shell.
+      const scopeId = createHash('sha256').update(base).digest('hex').slice(0, 8)
+
       // The generated worker knows Vite's hashed asset names without adding a
       // runtime caching dependency. It only caches this explicit app shell.
       const serviceWorker = `
-const CACHE_PREFIX = 'moon-photo-app-';
+const CACHE_PREFIX = 'moon-photo-app-${scopeId}-';
 const CACHE_NAME = CACHE_PREFIX + '${cacheVersion}';
+const LEGACY_CACHE = /^moon-photo-app-[0-9a-f]{12}$/;
 const APP_SHELL = ${JSON.stringify([...new Set(shellFiles)])};
 
 self.addEventListener('install', (event) => {
@@ -97,7 +123,7 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then((names) => Promise.all(
         names
-          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+          .filter((name) => (name.startsWith(CACHE_PREFIX) || LEGACY_CACHE.test(name)) && name !== CACHE_NAME)
           .map((name) => caches.delete(name)),
       ))
       .then(() => self.clients.claim()),

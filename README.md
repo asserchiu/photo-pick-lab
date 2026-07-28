@@ -70,18 +70,37 @@ npm run test:e2e
 
 ## Deployment
 
-`.github/workflows/deploy.yml` verifies and publishes `dist` to GitHub Pages after every push to `main`; it can also be started manually from the Actions tab. Configure the repository once under **Settings → Pages → Build and deployment → Source** by selecting **GitHub Actions**.
+`.github/workflows/deploy.yml` verifies and publishes to GitHub Pages. Configure the repository once under **Settings → Pages → Build and deployment → Source** by selecting **GitHub Actions**.
 
-The workflow injects `BASE_PATH` for Vite assets and `SITE_URL` as the full public URL prefix used by canonical, Open Graph, and Twitter metadata. `SITE_URL` honors a repository Actions variable of the same name and otherwise derives the repository's project-page URL. This keeps the deployment host and prefix out of the product source; use a full HTTPS URL ending in `/` when overriding it.
+Pages serves one site per repository, so several versions can only be online at once if the workflow assembles the whole directory tree itself. A `gh-pages` branch stores the published tree between runs; each run rewrites a single slot in it and re-uploads everything as the Pages artifact. That branch is storage only — do not switch the Pages source to "Deploy from a branch".
 
-The expected default project-page URL is <https://asserchiu.github.io/photo-pick-lab/>. Validate the same subpath locally before changing deployment behavior:
+| Trigger | Slot | URL |
+| --- | --- | --- |
+| Push to `main` | site root | <https://asserchiu.github.io/photo-pick-lab/> |
+| Push tag `v*` | `version/<tag>` | `…/photo-pick-lab/version/v1.2.3/` |
+| Pull request labeled `deploy-preview` | `preview/pr-<number>` | `…/photo-pick-lab/preview/pr-42/` |
+| Manual run off a branch | `preview/branch-<slug>` | `…/photo-pick-lab/preview/branch-my-feature/` |
+| — | version index | `…/photo-pick-lab/versions/` |
+
+Production deploys only replace the root; `preview/`, `version/`, and the registry are excluded from the sync so parallel versions survive. A preview is deleted when its pull request closes or loses the `deploy-preview` label. Other slots are removed by running the workflow manually with a `remove_slot` input such as `version/v1.0.0`. `.github/tools/render-site-index.mjs` performs the tree rewrite: it installs or deletes one slot, maintains `versions.json`, and renders the version index, dropping entries whose directory has disappeared. The publish job always runs that script from the default branch, so a pull request cannot supply the code that holds the deployment credentials.
+
+The workflow injects `BASE_PATH` for Vite assets and `SITE_URL` as the full public URL prefix used by canonical, Open Graph, and Twitter metadata, both derived from the slot. `SITE_URL` honors a repository Actions variable of the same name for the site root and otherwise derives the repository's project-page URL. This keeps the deployment host and prefix out of the product source; use a full HTTPS URL ending in `/` when overriding it. Everything except the production slot also builds with `SITE_NOINDEX=1`, which adds `<meta name="robots" content="noindex">` so previews and superseded releases stay out of search results.
+
+Validate a subpath locally before changing deployment behavior:
 
 ```bash
 BASE_PATH=/photo-pick-lab/ npm run verify
 BASE_PATH=/photo-pick-lab/ npm run test:e2e
+BASE_PATH=/photo-pick-lab/preview/pr-42/ SITE_NOINDEX=1 npm run verify
 ```
 
-The base path is applied to Vite assets, the web app manifest, the service worker, the photo-analysis worker, and in-app home navigation. Social previews use the square `public/icons/moon-512.png` icon with a standard `summary` card rather than an App screenshot or large-image card.
+The base path is applied to Vite assets, the web app manifest, the service worker, the photo-analysis worker, and in-app home navigation. It also scopes the service worker's cache names: Cache Storage is shared per origin, so without a per-base prefix each version would evict every other version's app shell. Social previews use the square `public/icons/moon-512.png` icon with a standard `summary` card rather than an App screenshot or large-image card.
+
+Known limits:
+
+- Pull requests from forks get a read-only token and cannot publish a preview.
+- Publishing is serialized through one `pages-site` concurrency group. GitHub keeps only one queued run per group, so simultaneous deploys can cancel an earlier queued publish; re-run that job.
+- The `gh-pages` branch accumulates build output and benefits from an occasional history squash.
 
 ## Known detector limits
 
